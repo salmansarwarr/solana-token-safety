@@ -16,7 +16,7 @@ function App() {
   const [wallet, setWallet] = useState(null);
   const [walletPublicKey, setWalletPublicKey] = useState(null);
   const [connection] = useState(
-    new Connection(clusterApiUrl('devnet'), 'confirmed')
+    new Connection('https://solana-mainnet.api.syndica.io/api-key/21P91u6oC24BUjduDPBnPEdmPWWz7fmFp3jtMBY52Mgq5j1CE9sjKbUv1TzPZGan2pKeDg289fHqvdP6UK5cAHhyJmuHSLE2qm', 'confirmed')
   );
   const [mintAddress, setMintAddress] = useState('');
   const [burnAmount, setBurnAmount] = useState('');
@@ -427,9 +427,7 @@ function App() {
           <h4>⚠️ Important Safety Notice</h4>
           <ul>
             <li>These operations are IRREVERSIBLE</li>
-            <li>Always test on devnet first</li>
             <li>Double-check all addresses before proceeding</li>
-            <li>Make sure you have Phantom wallet installed</li>
           </ul>
         </div>
 
