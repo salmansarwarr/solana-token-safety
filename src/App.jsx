@@ -2,21 +2,33 @@ import { useState, useEffect } from 'react';
 import { Connection, PublicKey, Transaction } from '@solana/web3.js';
 import {
   TOKEN_PROGRAM_ID,
+  TOKEN_2022_PROGRAM_ID,
   createSetAuthorityInstruction,
   AuthorityType,
   createBurnInstruction,
   getAssociatedTokenAddress,
+  getMint,
 } from '@solana/spl-token';
 import { ToastContainer, toast } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
 import './App.css';
 import { clusterApiUrl } from '@solana/web3.js';
+import { createUmi } from '@metaplex-foundation/umi-bundle-defaults';
+import { walletAdapterIdentity } from '@metaplex-foundation/umi-signer-wallet-adapters';
+import { 
+  createMetadataAccountV3,
+  findMetadataPda,
+  mplTokenMetadata,
+} from '@metaplex-foundation/mpl-token-metadata';
+import { publicKey, transactionBuilder } from '@metaplex-foundation/umi';
+import { fromWeb3JsPublicKey, toWeb3JsInstruction } from '@metaplex-foundation/umi-web3js-adapters';
 
 function App() {
   const [wallet, setWallet] = useState(null);
   const [walletPublicKey, setWalletPublicKey] = useState(null);
   const [connection] = useState(
     new Connection('https://solana-mainnet.api.syndica.io/api-key/21P91u6oC24BUjduDPBnPEdmPWWz7fmFp3jtMBY52Mgq5j1CE9sjKbUv1TzPZGan2pKeDg289fHqvdP6UK5cAHhyJmuHSLE2qm', 'confirmed')
+    // new Connection(clusterApiUrl('devnet'), 'confirmed')
   );
   const [mintAddress, setMintAddress] = useState('');
   const [burnAmount, setBurnAmount] = useState('');
@@ -24,6 +36,11 @@ function App() {
   const [lpLockAmount, setLpLockAmount] = useState('');
   const [logs, setLogs] = useState([]);
   const [isConnected, setIsConnected] = useState(false);
+  
+  // Metadata form fields
+  const [tokenName, setTokenName] = useState('');
+  const [tokenSymbol, setTokenSymbol] = useState('');
+  const [tokenUri, setTokenUri] = useState('');
 
   useEffect(() => {
     checkIfWalletConnected();
@@ -174,6 +191,100 @@ function App() {
     }
   };
 
+  // Determine if token is Token-2022 or legacy
+  const determineTokenProgram = async (mintPubkey) => {
+    try {
+      // Try Token-2022 first
+      try {
+        await getMint(connection, mintPubkey, 'confirmed', TOKEN_2022_PROGRAM_ID);
+        return TOKEN_2022_PROGRAM_ID;
+      } catch (e) {
+        // If Token-2022 fails, try legacy
+        await getMint(connection, mintPubkey, 'confirmed', TOKEN_PROGRAM_ID);
+        return TOKEN_PROGRAM_ID;
+      }
+    } catch (error) {
+      throw new Error('Invalid mint address or token not found');
+    }
+  };
+
+  const addMetadata = async () => {
+    try {
+      if (!walletPublicKey) {
+        addLog('Please connect your wallet first', 'error');
+        return;
+      }
+      if (!mintAddress) {
+        addLog('Please enter token mint address', 'error');
+        return;
+      }
+      if (!tokenName || !tokenSymbol || !tokenUri) {
+        addLog('Please fill in all metadata fields (Name, Symbol, URI)', 'error');
+        return;
+      }
+  
+      addLog('Detecting token type...', 'info');
+      const mint = new PublicKey(mintAddress);
+      
+      // Determine token program
+      const tokenProgram = await determineTokenProgram(mint);
+      const isToken22 = tokenProgram.equals(TOKEN_2022_PROGRAM_ID);
+      
+      addLog(`Token type detected: ${isToken22 ? 'Token-2022' : 'Legacy SPL Token'}`, 'info');
+      addLog('Creating metadata...', 'info');
+  
+      // Create UMI instance
+      const umi = createUmi(connection.rpcEndpoint)
+        .use(mplTokenMetadata());
+  
+      // Convert to UMI public keys
+      const mintUmi = publicKey(mintAddress);
+      const updateAuthorityUmi = publicKey(walletPublicKey.toBase58());
+  
+      // Find metadata PDA
+      const metadataPda = findMetadataPda(umi, { mint: mintUmi });
+  
+      // Create metadata instruction
+      const createMetadataIx = createMetadataAccountV3(umi, {
+        metadata: metadataPda,
+        mint: mintUmi,
+        mintAuthority: updateAuthorityUmi,
+        payer: updateAuthorityUmi,
+        updateAuthority: updateAuthorityUmi,
+        data: {
+          name: tokenName,
+          symbol: tokenSymbol,
+          uri: tokenUri,
+          sellerFeeBasisPoints: 0,
+          creators: null,
+          collection: null,
+          uses: null,
+        },
+        isMutable: true,
+        collectionDetails: null,
+      });
+  
+      // Get the instruction and convert to web3.js
+      const instruction = createMetadataIx.getInstructions()[0];
+      const web3Instruction = toWeb3JsInstruction(instruction);
+      
+      // Create and send transaction
+      const transaction = new Transaction().add(web3Instruction);
+      const signature = await sendTransaction(transaction);
+  
+      addLog('✅ Metadata added successfully!', 'success');
+      addLog(`TX: https://solscan.io/tx/${signature}`, 'success');
+      
+      // Clear form
+      setTokenName('');
+      setTokenSymbol('');
+      setTokenUri('');
+    } catch (error) {
+      addLog(`❌ Error: ${error.message}`, 'error');
+      console.error('Metadata error:', error);
+    }
+  };
+
   const revokeMintAuthority = async () => {
     try {
       if (!walletPublicKey) {
@@ -188,6 +299,7 @@ function App() {
       addLog('Revoking mint authority...', 'info');
 
       const mint = new PublicKey(mintAddress);
+      const tokenProgram = await determineTokenProgram(mint);
       const transaction = new Transaction();
 
       const instruction = createSetAuthorityInstruction(
@@ -196,7 +308,7 @@ function App() {
         AuthorityType.MintTokens,
         null,
         [],
-        TOKEN_PROGRAM_ID
+        tokenProgram
       );
 
       transaction.add(instruction);
@@ -223,6 +335,7 @@ function App() {
       addLog('Revoking freeze authority...', 'info');
 
       const mint = new PublicKey(mintAddress);
+      const tokenProgram = await determineTokenProgram(mint);
       const transaction = new Transaction();
 
       const instruction = createSetAuthorityInstruction(
@@ -231,7 +344,7 @@ function App() {
         AuthorityType.FreezeAccount,
         null,
         [],
-        TOKEN_PROGRAM_ID
+        tokenProgram
       );
 
       transaction.add(instruction);
@@ -260,11 +373,12 @@ function App() {
       }
   
       addLog(`Burning ${burnAmount} tokens...`, 'info');
-  
+
       const mint = new PublicKey(mintAddress);
+      const tokenProgram = await determineTokenProgram(mint);
       
       // Get the associated token account
-      const tokenAccount = await getAssociatedTokenAddress(mint, walletPublicKey);
+      const tokenAccount = await getAssociatedTokenAddress(mint, walletPublicKey, false, tokenProgram);
       
       // IMPORTANT: Check if the account exists and has the right data
       const accountInfo = await connection.getAccountInfo(tokenAccount);
@@ -305,7 +419,7 @@ function App() {
         walletPublicKey,
         amountWithDecimals,
         [],
-        TOKEN_PROGRAM_ID
+        tokenProgram
       );
   
       transaction.add(instruction);
@@ -336,9 +450,10 @@ function App() {
       }
   
       addLog(`Burning ${lpLockAmount} LP tokens permanently...`, 'info');
-  
+
       const lpMint = new PublicKey(lpMintAddress);
-      const tokenAccount = await getAssociatedTokenAddress(lpMint, walletPublicKey);
+      const tokenProgram = await determineTokenProgram(lpMint);
+      const tokenAccount = await getAssociatedTokenAddress(lpMint, walletPublicKey, false, tokenProgram);
       
       // Check if account exists
       const accountInfo = await connection.getAccountInfo(tokenAccount);
@@ -378,7 +493,7 @@ function App() {
         walletPublicKey,
         amountWithDecimals,
         [],
-        TOKEN_PROGRAM_ID
+        tokenProgram
       );
   
       transaction.add(instruction);
@@ -396,7 +511,7 @@ function App() {
 
   const getExplorerUrl = (signature) => {
     const baseUrl = 'https://solscan.io/tx/';
-    const network = 'devnet'; // or get from state if dynamic
+    const network = 'mainnet'; // Changed from 'devnet'
     return network === 'devnet' 
       ? `${baseUrl}${signature}?cluster=devnet`
       : `${baseUrl}${signature}`;
@@ -466,6 +581,35 @@ function App() {
         </div>
 
         <div className="actions-grid">
+          <div className="action-card">
+            <h3>📝 Add Metadata</h3>
+            <p>Add name, symbol, and URI to your token (supports Token-2022 & Legacy)</p>
+            <input
+              type="text"
+              placeholder="Token Name"
+              value={tokenName}
+              onChange={(e) => setTokenName(e.target.value)}
+              className="amount-input"
+            />
+            <input
+              type="text"
+              placeholder="Token Symbol"
+              value={tokenSymbol}
+              onChange={(e) => setTokenSymbol(e.target.value)}
+              className="amount-input"
+            />
+            <input
+              type="text"
+              placeholder="Metadata URI (JSON)"
+              value={tokenUri}
+              onChange={(e) => setTokenUri(e.target.value)}
+              className="amount-input"
+            />
+            <button className="btn-primary" onClick={addMetadata}>
+              Add Metadata
+            </button>
+          </div>
+
           <div className="action-card">
             <h3>🚫 Revoke Mint</h3>
             <p>Prevent creation of new tokens permanently</p>
